@@ -12,6 +12,7 @@ import { CashButton } from "../ui/CashButton";
 import { StateMachine } from "../core/StateMachine";
 import { ASSETS } from "../config/assets.config";
 import { FONT_FAMILY } from "../utils/fonts";
+import { SoundManager } from "../utils/sound";
 
 type Platform = {
   x: number;
@@ -88,6 +89,10 @@ export class GameScene implements Scene {
   private currentLiftY = 0;
   private targetLiftY = 0;
 
+  // Sound manager
+  private soundManager = new SoundManager();
+  private soundtrackStarted = false;
+
   constructor(private game: Game) {
     // Порядок слоёв: небо → облака → ландшафт → платформы + курица → UI
     this.view.addChild(this.bgLayer);        // Фиксированный фон (только небо)
@@ -160,46 +165,59 @@ export class GameScene implements Scene {
         },
         update: (dt) => {
           const elapsed = performance.now() - this.deathStartTime;
-          const duration = 2230;
+          const duration = 5000; // Увеличили длительность до 5 секунд (очень медленно)
           const t = Math.min(elapsed / duration, 1);
 
           if (this.deathFx) {
-            this.deathFx.update(t);
+            this.deathFx.update(Math.min(t * 2, 1)); // Эффект разрушения быстрее чем основная анимация
           }
 
-          // UI re-enables at the 1s "sweet spot"
-          if (elapsed > 2230 && !this.playBtn.isEnabled()) {
+          // UI re-enables позже
+          if (elapsed > 5000 && !this.playBtn.isEnabled()) {
             this.playBtn.setEnabled(true);
             this.playBtn.setText("PLAY");
             this.panel.enabled = true;
           }
 
-          // Cubic Ease-Out Camera Space: Buttery smooth deceleration
-          const easeT = 1 - Math.pow(1 - t, 3);
+          // Более плавное движение камеры с квинтичным easing (еще медленнее)
+          const easeT = 1 - Math.pow(1 - t, 5);
           const camY = this.deathWorldY * (1 - easeT);
 
           this.world.y = camY;
           this.landscapeLayer.y = camY;
           this.cloudLayer.y = camY;
 
-          // Restore normal scale
-          this.chicken.scale.set(this.chicken.baseScaleValue);
+          // Плавное изменение масштаба: курица немного увеличивается в начале падения
+          const scalePhase = t < 0.4 ? t / 0.4 : 1; // Дольше увеличивается
+          const startScale = this.chicken.baseScaleValue * 1.2; // Начинаем с еще большего масштаба
+          const endScale = this.chicken.baseScaleValue;
+          const currentScale = startScale + (endScale - startScale) * scalePhase;
+          this.chicken.scale.set(currentScale * Math.abs(Math.sign(this.chicken.scale.x)), currentScale);
 
-          // Organic Feather Physics
+          // Очень медленная физика падения с сильным затуханием
           const dtSec = dt / 60;
-          const featherGravity = 120;
+          const featherGravity = 60; // Уменьшили гравитацию до 60 (очень медленно)
 
           this.chickenVelY += featherGravity * dtSec;
-          this.chickenVelY *= 0.94;
+          this.chickenVelY *= 0.97; // Еще больше сопротивление воздуха
 
           this.chicken.y += this.chickenVelY * dtSec;
 
-          // Organic Sway: chaotic in start, graceful in finish
-          const swayAmp = 45 * (1 - t);
-          this.chicken.x = this.deathStartX + Math.sin(t * Math.PI * 10) * swayAmp;
+          // Более плавное спиральное падение
+          const spiralFreq = 2.5; // Меньше оборотов спирали (медленнее)
+          const swayAmp = 70 * (1 - t * 0.6); // Больше амплитуда, медленнее уменьшается
+          const spiralX = Math.sin(t * Math.PI * spiralFreq) * swayAmp;
+          const driftX = t * 15 * Math.sign(this.chicken.scale.x); // Меньше дрейф
+          this.chicken.x = this.deathStartX + spiralX + driftX;
 
-          // Dampened Rotation: impact initial tilt + gradual leveling
-          this.chicken.rotation = t * Math.PI * 0.4 * (1 - t) * Math.sign(this.chicken.scale.x);
+          // Более медленное кувыркание
+          const rotationSpeed = 2.0; // Уменьшили скорость вращения
+          const rotationEase = t < 0.8 ? t / 0.8 : 1; // Вращение замедляется еще позже
+          this.chicken.rotation = rotationEase * Math.PI * 2 * rotationSpeed * Math.sign(this.chicken.scale.x);
+
+          // Более выраженное покачивание для эффекта "перышка"
+          const bobbing = Math.sin(t * Math.PI * 6) * 8 * (1 - t); // Медленнее, но амплитуда больше
+          this.chicken.y += bobbing * dtSec;
 
           if (t >= 1) {
             this.resetGame();
@@ -681,7 +699,16 @@ export class GameScene implements Scene {
 
       // Выносим курицу на передний план (если она была сзади после выигрыша)
       this.world.addChild(this.chicken);
+
+      // Запускаем фоновую музыку при первом клике (после взаимодействия пользователя)
+      if (!this.soundtrackStarted) {
+        this.soundManager.startSoundtrack();
+        this.soundtrackStarted = true;
+      }
     }
+
+    // Звук шага при каждом прыжке
+    this.soundManager.play('step');
 
     this.playBtn.setEnabled(false);
 
@@ -689,20 +716,9 @@ export class GameScene implements Scene {
     this.currentPlatformIndex++;
 
     if (this.currentPlatformIndex >= this.platforms.length) {
-      // Закончились платформы - сбрасываем
-      this.currentPlatformIndex = -1;
-      this.playBtn.setText("PLAY"); // Возвращаем текст PLAY
-      this.playBtn.setEnabled(true);
-      this.panel.enabled = true; // Снова разрешаем менять ставку после прохождения уровня
-      this.checkBetLimit(); // Синхронизируем лимиты
-
-      // Сбрасываем индикаторы (хотя при победе это может быть не нужно, если уровень будет пересобираться, но для надежности)
-      const indTex = Assets.get(ASSETS.indicator);
-      if (indTex) {
-        for (const p of this.platforms) {
-          p.indicator.texture = indTex;
-        }
-      }
+      // Закончились платформы - курица прошла весь уровень!
+      // Запускаем анимацию победного вылета
+      this.triggerFinalWin();
       return;
     }
 
@@ -793,7 +809,8 @@ export class GameScene implements Scene {
     // Проверяем проигрыш
     const shotChance = GAME_CFG.difficulties[this.difficulty].shotChance;
     if (chance(shotChance)) {
-      this.chickenVelY = -200; // Меньше подброс (было -400)
+      this.soundManager.play('lose');
+      this.chickenVelY = -120; // Более мягкий начальный импульс для медленного падения
       this.sm.set("dead");
       return;
     }
@@ -804,10 +821,58 @@ export class GameScene implements Scene {
     this.sm.set("idle");
   }
 
+  private triggerFinalWin() {
+    // Когда курица прошла все платформы - автоматический cashout на максимальный коэффициент
+    const lastPlatform = this.platforms[this.platforms.length - 1];
+    const win = this.bet * lastPlatform.mult;
+
+    // Начисляем выигрыш
+    this.balance += win;
+    this.balanceUI.setBalance(this.balance);
+    this.checkBetLimit();
+
+    // Делаем кнопки неактивными и скрываем CASHOUT
+    this.cashBtn.hide();
+    this.cashBtn.setEnabled(false);
+    this.playBtn.setEnabled(false);
+
+    // Показываем выигрыш
+    this.panel.enabled = true;
+    this.panel.showWin(win);
+
+    // Подготовка и запуск анимации курицы
+    const startX = this.chicken.x;
+    const startYPos = this.chicken.y;
+    const startScale = Math.abs(this.chicken.scale.x);
+    const direction = Math.sign(this.chicken.scale.x);
+
+    this.winStartTime = performance.now();
+    this.winData = {
+      startX,
+      startY: startYPos,
+      targetX: direction > 0 ? this.w + 350 : -350,
+      targetY: startYPos - 250,
+      startScale,
+      targetScale: startScale * 1.1,
+      direction
+    };
+
+    // Перемещаем за платформы
+    this.world.addChildAt(this.chicken, 0);
+
+    // Играем звук cashout
+    this.soundManager.play('cashout');
+
+    this.sm.set("win");
+  }
+
   private async onCashout() {
     if (this.currentPlatformIndex === -1) return;
 
     const p = this.platforms[this.currentPlatformIndex];
+
+    // Звук cashout
+    this.soundManager.play('cashout');
 
     // 1. Меняем индикатор на золотой
     const goldTex = await Assets.load(ASSETS.indicatorGold);
@@ -864,6 +929,7 @@ export class GameScene implements Scene {
 
     // Перемещаем за платформы
     this.world.addChildAt(this.chicken, 0);
+
     this.sm.set("win");
 
   }
