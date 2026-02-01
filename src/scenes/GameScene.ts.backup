@@ -1,0 +1,591 @@
+import { Container, Graphics, Text, Sprite, Assets, TilingSprite, Texture } from "pixi.js";
+import type { Game, Scene } from "../Game";
+import type { Difficulty } from "../config/game.config";
+import { GAME_CFG } from "../config/game.config";
+import { chance, clamp, formatX, rnd } from "../utils/math";
+import { ChickenPuppet } from "../animations/ChickenPuppet";
+import { makePop } from "../animations/Effects";
+import { BalanceUI } from "../ui/Balance";
+import { BetPanel } from "../ui/BetPanel";
+import { SpinButton } from "../ui/SpinButton";
+import { StateMachine } from "../core/StateMachine";
+import { ASSETS } from "../config/assets.config";
+import { FONT_FAMILY } from "../utils/fonts";
+
+type Platform = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  mult: number;
+  container: Container;
+  sprite: Sprite;
+  indicator: Sprite;
+  label: Text;
+};
+
+export class GameScene implements Scene {
+  private static readonly DESIGN_W = 1280;
+  private static readonly DESIGN_H = 832;
+
+  private view = new Container();
+  private bgLayer = new Container();   // Фиксированный слой для фона
+  private root = new Container();
+
+  private bg?: Sprite;
+
+  private clouds: Sprite[] = [];
+
+  private ground?: TilingSprite;
+  private groundBg?: Graphics;
+  private grass?: TilingSprite;
+  private trees: Sprite[] = [];
+  private lamps: Sprite[] = [];
+  private landscape = new Container(); // Статичный слой: дорога, деревья, лампы
+  private world = new Container();     // Прокручиваемый слой: платформы
+  private chickenLayer = new Container(); // Фиксированный слой для курицы
+  private platforms: Platform[] = [];
+
+  private chicken = new ChickenPuppet();
+  private chickenVelY = 0;
+  private target: { x: number; y: number } | null = null;
+  private jumpT = 0;
+
+  private isDragging = false;
+  private lastY = 0;
+
+  private ui = new Container();
+  private balanceUI = new BalanceUI();
+  private panel!: BetPanel;
+  private playBtn!: SpinButton;
+
+  private balance = 5000;
+  private bet = 5000;
+  private difficulty: Difficulty = "easy";
+
+  // дизайн-размеры
+  private w = GameScene.DESIGN_W;
+  private h = GameScene.DESIGN_H;
+
+  private sm = new StateMachine();
+
+  constructor(private game: Game) {
+    // Порядок слоёв: фон (фиксирован) → world (скроллится: ландшафт + платформы) → курица (фиксирована) → UI
+    this.view.addChild(this.bgLayer);   // Фиксированный фон (только небо и облака)
+    this.view.addChild(this.world);     // Прокручиваемый мир (дорога, деревья, лампы, платформы)
+    this.view.addChild(this.chickenLayer); // Курица поверх всего, но под UI
+    this.view.addChild(this.ui);        // UI всегда сверху
+
+    // Добавляем landscape в world, чтобы дорога скроллилась вместе с платформами
+    this.world.addChild(this.landscape);
+    this.chickenLayer.addChild(this.chicken); // Курица в отдельном фиксированном слое
+
+    // Добавляем интерактивность для скролла
+    this.world.interactive = true;
+    this.world.eventMode = 'static';
+    // Увеличили область до 22000px для всех платформ (239 * 88px ≈ 21000px)
+    (this.world as any).hitArea = new Graphics().rect(0, -22000, 2000, 23000).fill({ alpha: 0 });
+    this.world.on("pointerdown", (e) => {
+      this.isDragging = true;
+      this.lastY = e.global.y;
+    });
+    this.world.on("globalpointermove", (e) => {
+      if (!this.isDragging) return;
+      const dy = e.global.y - this.lastY;
+      // ИНВЕРТИРУЕМ: листаем вверх (dy > 0) → платформы идут вниз (world.y увеличивается)
+      this.world.y = clamp(this.world.y + dy, 0, 21500);
+      this.lastY = e.global.y;
+    });
+    this.world.on("pointerup", () => this.isDragging = false);
+    this.world.on("pointerupoutside", () => this.isDragging = false);
+
+    // Добавляем поддержку колеса мыши для MacBook
+    this.world.on("wheel", (e: any) => {
+      const delta = e.deltaY;
+      // ИНВЕРТИРУЕМ: прокрутка вверх (delta < 0) → платформы идут вниз (world.y увеличивается)
+      this.world.y = clamp(this.world.y + delta, 0, 21500);
+      e.preventDefault();
+    });
+
+    this.panel = new BetPanel({
+      onDifficulty: (d) => {
+        this.difficulty = d;
+        this.panel.setDifficulty(d);
+      },
+      onBet: (b) => {
+        this.bet = clamp(b, GAME_CFG.bet.min, GAME_CFG.bet.max);
+        this.panel.setBet(this.bet);
+      }
+    });
+
+    this.playBtn = new SpinButton(() => this.onPlay());
+    this.ui.addChild(this.panel, this.playBtn, this.balanceUI as any);
+
+    // Временно скрываем панель ставки
+    this.panel.visible = false;
+    this.playBtn.visible = false;
+    this.balanceUI.visible = false;
+
+    this.sm
+      .add({ name: "idle" })
+      .add({
+        name: "jump",
+        enter: () => {
+          this.jumpT = 0;
+          this.chickenVelY = -GAME_CFG.world.gravity * GAME_CFG.world.jumpTime * 0.55;
+        },
+        update: (dt) => this.updateJump(dt)
+      })
+      .add({
+        name: "dead",
+        enter: () => this.playBtn.setEnabled(true)
+      });
+
+    this.sm.set("idle");
+  }
+
+  enter() {
+    this.game.app.stage.addChild(this.view);
+
+    this.balanceUI.setBalance(this.balance);
+    this.panel.setDifficulty(this.difficulty);
+    this.panel.setBet(this.bet);
+
+    this.buildLevel();
+    this.layoutUI();
+    this.drawGround();
+    this.layoutPlatforms();
+
+    this.ensureBgAndClouds();
+    this.ensureTreesAndLamps();
+
+    // Добавляем нативный обработчик wheel для canvas
+    const canvas = this.game.app.canvas as HTMLCanvasElement;
+    canvas.addEventListener('wheel', this.handleWheel, { passive: false });
+  }
+
+  private handleWheel = (e: WheelEvent) => {
+    e.preventDefault();
+    const delta = e.deltaY;
+    // ИНВЕРТИРУЕМ: прокрутка вверх (delta < 0) → платформы идут вниз (world.y увеличивается)
+    this.world.y = clamp(this.world.y + delta, 0, 21500);
+  };
+
+  exit() {
+    this.view.removeFromParent();
+
+    this.bg?.destroy();
+    this.clouds.forEach(c => c.destroy());
+    this.clouds = [];
+    this.trees.forEach(t => t.destroy());
+    this.trees = [];
+    this.lamps.forEach(l => l.destroy());
+    this.lamps = [];
+    this.bg = undefined;
+  }
+
+  update(dt: number) {
+    this.sm.update(dt);
+    // Курица теперь зафиксирована в chickenLayer, ей не нужна компенсация скролла
+  }
+
+  resize(screenW: number, screenH: number) {
+    // ✅ масштабируем под экран, сохраняя аспект 1280×832
+    const sx = screenW / this.w;
+    const sy = screenH / this.h;
+    const s = Math.min(sx, sy);
+
+    this.view.scale.set(s);
+    this.view.position.set(
+      Math.floor((screenW - this.w * s) / 2),
+      Math.floor((screenH - this.h * s) / 2)
+    );
+
+    if (this.bg) {
+      this.bg.width = this.w;
+      this.bg.height = this.h;
+    }
+
+    this.drawGround();
+    this.layoutUI();
+    this.layoutPlatforms();
+  }
+
+  // ---------- BG + CLOUDS ----------
+
+  private ensureBgAndClouds() {
+    (async () => {
+      await Assets.load([
+        ASSETS.sky,
+        ASSETS.cloud1,
+        ASSETS.cloud2,
+        ASSETS.cloud3,
+        ASSETS.grass,
+        ASSETS.platform,
+        ASSETS.indicator,
+        ASSETS.chickenBody
+      ]);
+
+      const skyTex = Assets.get(ASSETS.sky);
+      if (!skyTex) throw new Error(`Sky texture not loaded: ${ASSETS.sky}`);
+
+      this.bg?.destroy();
+      this.bg = new Sprite(skyTex);
+      this.bg.anchor.set(0);
+      this.bg.width = this.w;
+      this.bg.height = this.h;
+      this.bgLayer.addChildAt(this.bg, 0); // Фон в отдельный фиксированный слой
+
+      // Удаляем старые облака
+      this.clouds.forEach(c => c.destroy());
+      this.clouds = [];
+
+      // Конфигурация облаков: [texture, x%, y%, width, height]
+      const cloudConfigs: [string, number, number, number, number][] = [
+        [ASSETS.cloud1, 0.58, 0.12, 211, 128],   // верхнее большое (чуть правее)
+        [ASSETS.cloud2, 0.88, 0.28, 141.65, 70], // по центру справа (чуть правее)
+        [ASSETS.cloud3, 0.50, 0.44, 117, 77],    // снизу слева (чуть правее)
+      ];
+
+      for (let i = 0; i < cloudConfigs.length; i++) {
+        const [asset, xPct, yPct, targetW, targetH] = cloudConfigs[i];
+        const tex = Assets.get(asset);
+        if (!tex) continue;
+
+        const sprite = new Sprite(tex);
+        sprite.anchor.set(0.5);
+        sprite.width = targetW;
+        sprite.height = targetH;
+        sprite.position.set(this.w * xPct, this.h * yPct);
+
+        this.bgLayer.addChildAt(sprite, i + 1); // Облака тоже в фиксированный слой
+        this.clouds.push(sprite);
+      }
+    })().catch(console.error);
+  }
+
+  // ---------- TREES + LAMPS ----------
+
+  private ensureTreesAndLamps() {
+    (async () => {
+      await Assets.load([ASSETS.tree, ASSETS.lamp]);
+
+      const treeTex = Assets.get(ASSETS.tree);
+      const lampTex = Assets.get(ASSETS.lamp);
+      if (!treeTex || !lampTex) throw new Error("Tree or lamp texture not loaded");
+
+      // Удаляем старые деревья и лампы
+      this.trees.forEach(t => t.destroy());
+      this.lamps.forEach(l => l.destroy());
+      this.trees = [];
+      this.lamps = [];
+
+      const groundTex = Assets.get(ASSETS.ground) as Texture;
+      const scale = 0.5;
+      const groundH = groundTex ? groundTex.height * scale : 100;
+      const groundY = this.h - groundH;
+      const grassH = 36; // высота травы
+
+      // Конфигурация: [type, x%, scale, zIndex]
+      // Лампы и деревья чередуются как на картинке
+      const decorConfigs: ["lamp" | "tree", number, number][] = [
+        ["lamp", 0.11, 0.35],   // левая лампа
+        ["tree", 0.23, 0.25],   // маленькое дерево слева
+        ["lamp", 0.48, 0.35],   // центральная лампа
+        ["tree", 0.62, 0.35],   // большое дерево в центре
+        ["lamp", 0.87, 0.35],   // правая лампа (сдвинули левее)
+        ["tree", 0.78, 0.28],   // дерево справа (сдвинули левее)
+      ];
+
+      for (let i = 0; i < decorConfigs.length; i++) {
+        const [type, xPct, scale] = decorConfigs[i];
+        const tex = type === "tree" ? treeTex : lampTex;
+        const sprite = new Sprite(tex);
+        sprite.anchor.set(0.5, 1); // привязка к низу
+        sprite.scale.set(scale);
+        // Позиционируем на верхней части ground (где трава) - теперь это Y=0 в world
+        sprite.position.set(this.w * xPct, 0);
+
+        // Добавляем в landscape после травы
+        const grassIndex = this.landscape.getChildIndex(this.grass!);
+        this.landscape.addChildAt(sprite, grassIndex + 1 + i);
+
+        if (type === "tree") {
+          this.trees.push(sprite);
+        } else {
+          this.lamps.push(sprite);
+        }
+      }
+    })().catch(console.error);
+  }
+
+  // ---------- UI / WORLD ----------
+
+  private layoutUI() {
+    const w = this.w;
+    const h = this.h;
+
+    const pad = Math.max(14, Math.floor(Math.min(w, h) * 0.02));
+    const panelW = Math.min(460, Math.floor(w * 0.40));
+    const panelH = Math.min(Math.floor(h * 0.86), 720);
+
+    this.panel.layout(panelW, panelH);
+    this.panel.position.set(pad, Math.floor((h - panelH) / 2));
+
+    this.balanceUI.position.set(
+      this.panel.x + Math.floor(panelW * 0.56),
+      this.panel.y + 58
+    );
+
+    this.playBtn.draw(Math.floor(panelW * 0.78), 74);
+    this.playBtn.position.set(
+      this.panel.x + Math.floor(panelW * 0.11),
+      this.panel.y + panelH - 110
+    );
+  }
+
+  private drawGround() {
+    const groundTex = Assets.get(ASSETS.ground) as Texture;
+    if (!groundTex) return;
+
+    const scale = 0.5; // уменьшаем в 2 раза
+    const groundH = groundTex.height * scale;
+    const y = 0; // Дорога теперь на Y=0 в координатах world
+
+    // Добавляем фон за дорогой, чтобы скрыть синие углы
+    if (!this.groundBg) {
+      this.groundBg = new Graphics();
+      this.landscape.addChildAt(this.groundBg, 0);
+    }
+    this.groundBg.clear();
+    this.groundBg.rect(0, y, this.w, groundH).fill({ color: 0x3F3F3A });
+
+    if (!this.ground) {
+      this.ground = new TilingSprite({
+        texture: groundTex,
+        width: this.w,
+        height: groundH
+      });
+      this.ground.tileScale.set(scale);
+      // Добавляем ground после фона
+      this.landscape.addChildAt(this.ground, 1);
+    }
+    this.ground.width = this.w;
+    this.ground.height = groundH;
+    this.ground.position.set(0, y);
+
+    // Добавляем текстурированную траву поверх ground
+    const grassTex = Assets.get(ASSETS.grass) as Texture;
+    if (!grassTex) return;
+
+    const grassH = 36; // высота травы
+    if (!this.grass) {
+      this.grass = new TilingSprite({
+        texture: grassTex,
+        width: this.w,
+        height: grassH
+      });
+      // Добавляем траву сразу после ground
+      this.landscape.addChildAt(this.grass, 2);
+    }
+    this.grass.width = this.w;
+    this.grass.height = grassH;
+    this.grass.position.set(0, y - grassH);
+  }
+
+  private layoutPlatforms() {
+    if (this.platforms.length === 0) return;
+
+    // baseY - позиция курицы в глобальных координатах (фиксированная)
+    const groundH = Math.floor(this.h * 0.18);
+    const baseY = this.h - groundH;
+
+    // Идеальные смещения из референса (справа-налево-справа...)
+    // Без рандома
+    const xOffsets = [
+      0.68, // 1.20x
+      0.54, // 1.30x
+      0.80, // 1.40x
+      0.68, // 1.50x
+      0.54, // 1.60x
+      0.78, // 1.70x
+      0.59, // 1.80x
+      0.88, // 1.90x
+      0.55,
+      0.68
+    ];
+
+    // Размещаем все 239 платформ ВЫШЕ курицы (отрицательные Y в world)
+    for (let i = 0; i < this.platforms.length; i++) {
+      const p = this.platforms[i];
+      const ratio = xOffsets[i % xOffsets.length];
+
+      const tx = this.w * ratio - 18;
+      // 120px интервал - увеличили расстояние между платформами
+      // Первая платформа на -150, вторая на -270, и т.д.
+      const py = -150 - i * 120;
+
+      p.w = 160;
+      p.h = 44;
+      p.x = clamp(tx, 400, this.w - 180);
+      p.y = py;
+
+      p.container.position.set(p.x, p.y);
+      p.sprite.width = p.w;
+      p.sprite.height = p.h;
+
+      p.indicator.width = 86;
+      p.indicator.height = 28;
+      p.indicator.position.set(p.w / 2, p.h - 5);
+
+      p.label.text = formatX(p.mult);
+      p.label.position.set(p.w / 2, p.h - 5);
+
+      p.container.visible = true;
+    }
+
+    // Курица зафиксирована на дороге в chickenLayer
+    this.chicken.position.set(this.w * 0.48, baseY + 80);
+  }
+
+  // ---------- GAMEPLAY ----------
+
+  private onPlay() {
+    if (this.balance < this.bet) return;
+
+    this.playBtn.setEnabled(false);
+
+    this.balance -= this.bet;
+    this.balanceUI.setBalance(this.balance);
+
+    // Прыжок на ПЕРВУЮ платформу (индекс 0)
+    const next = this.platforms[0];
+    // target.y теперь в координатах world, но курица в chickenLayer
+    // Нужно преобразовать координаты
+    const targetWorldY = next.y + this.world.y; // преобразуем в глобальные координаты
+    this.target = { x: next.x + next.w / 2, y: targetWorldY };
+
+    this.sm.set("jump");
+  }
+
+  private updateJump(dt: number) {
+    if (!this.target) {
+      this.sm.set("idle");
+      return;
+    }
+
+    const step = dt / 60;
+
+    this.jumpT = clamp(this.jumpT + step / 0.55, 0, 1);
+
+    const sx = this.chicken.x;
+    const tx = this.target.x;
+    this.chicken.x = sx + (tx - sx) * 0.12;
+
+    this.chickenVelY += GAME_CFG.world.gravity * step;
+    this.chicken.y += this.chickenVelY * step;
+
+    this.chicken.setPoseJump(this.jumpT);
+
+    if (this.chicken.y >= this.target.y) {
+      this.chicken.y = this.target.y;
+      this.onLand();
+    }
+  }
+
+  private onLand() {
+    const fx = makePop(this.chicken.x, this.chicken.y + 18);
+    this.chickenLayer.addChild(fx.node); // Эффекты в том же слое, что и курица
+
+    const start = performance.now();
+    const anim = () => {
+      const now = performance.now();
+      const t = clamp((now - start) / 240, 0, 1);
+      fx.update(t);
+      if (t < 1) requestAnimationFrame(anim);
+      else fx.node.destroy({ children: true });
+    };
+    requestAnimationFrame(anim);
+
+    const p = GAME_CFG.difficulties[this.difficulty].shotChance;
+    if (chance(p)) {
+      this.target = null;
+      this.playBtn.setEnabled(true);
+      this.sm.set("dead");
+      return;
+    }
+
+    const landed = this.findNearestPlatform();
+    const win = Math.floor(this.bet * (landed?.mult ?? 1));
+    this.balance += win;
+    this.balanceUI.setBalance(this.balance);
+
+    this.target = null;
+    this.playBtn.setEnabled(true);
+    this.sm.set("idle");
+  }
+
+  private findNearestPlatform() {
+    let best: Platform | null = null;
+    let bd = 1e9;
+
+    for (const p of this.platforms) {
+      const cx = p.x + p.w / 2;
+      // Преобразуем координаты платформы в глобальные (как у курицы)
+      const cy = p.y + this.world.y;
+      const d = Math.abs(cx - this.chicken.x) + Math.abs(cy - this.chicken.y);
+      if (d < bd) {
+        bd = d;
+        best = p;
+      }
+    }
+
+    return best;
+  }
+
+  // ---------- LEVEL ----------
+
+  private buildLevel() {
+    for (const p of this.platforms) {
+      p.container.destroy({ children: true });
+    }
+    this.platforms = [];
+
+    const platTex = Assets.get(ASSETS.platform);
+    const indTex = Assets.get(ASSETS.indicator);
+
+    // До 25.0x при шаге 0.1 нужно 239 платформ (1.2 + 238*0.1 = 25.0)
+    for (let i = 0; i < 239; i++) {
+      const container = new Container();
+      const sprite = new Sprite(platTex);
+      const indicator = new Sprite(indTex);
+      indicator.anchor.set(0.5);
+
+      const mult = 1.2 + i * 0.1;
+      const label = new Text({
+        text: formatX(mult),
+        style: { fontFamily: FONT_FAMILY, fill: 0xffffff, fontSize: 18, fontWeight: "800" }
+      });
+      label.anchor.set(0.5);
+
+      container.addChild(sprite, indicator, label);
+      this.world.addChild(container);
+
+      this.platforms.push({
+        x: 0,
+        y: 0,
+        w: 160,
+        h: 44,
+        mult: 1.2 + i * 0.1,
+        container,
+        sprite,
+        indicator,
+        label
+      });
+    }
+
+    // chicken теперь в root, не добавляем в world
+    // this.world.addChild(this.chicken); 
+    // this.chicken.position.set(0, 0);
+  }
+}

@@ -1,0 +1,26 @@
+export const ASSETS = {
+  sky: "/assets/bg/sky.png",
+  cloud1: "/assets/bg/cloud1.png",
+  cloud2: "/assets/bg/cloud2.png",
+  cloud3: "/assets/bg/cloud3.png",
+  ground: "/assets/world/ground.png",
+  grass: "/assets/world/dress.png",
+  tree: "/assets/world/tree.png",
+  lamp: "/assets/world/lamp.png",
+  platform: "/assets/game/platform.png",
+  platformRed: "/assets/game/platform-red.png",
+  indicator: "/assets/game/indicator.png",
+  indicatorGreen: "/assets/game/indicator-green.png",
+  indicatorGold: "/assets/game/indicator-gold.png",
+  chickenBody: "/assets/game/chicken/body.png",
+  chickenBodyBase: "/assets/game/chicken/body_base.png",
+  chickenComb: "/assets/game/chicken/comb.png",
+  chickenFace: "/assets/game/chicken/face.png",
+  chickenWings: "/assets/game/chicken/wings.png",
+  chickenLegs: "/assets/game/chicken/legs.png",
+  playIcon: "/assets/game/play.png",
+  cashoutIcon: "/assets/game/cashout.png",
+  cashoutBg: "/assets/game/cashout-bg.png",
+} as const;
+
+export type AssetKey = keyof typeof ASSETS;
