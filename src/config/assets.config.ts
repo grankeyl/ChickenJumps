@@ -9,6 +9,7 @@ export const ASSETS = {
   lamp: "/assets/world/lamp.png",
   platform: "/assets/game/platform.png",
   platformRed: "/assets/game/platform-red.png",
+  platformFinish: "/assets/game/platform-finish.png",
   indicator: "/assets/game/indicator.png",
   indicatorGreen: "/assets/game/indicator-green.png",
   indicatorGold: "/assets/game/indicator-gold.png",

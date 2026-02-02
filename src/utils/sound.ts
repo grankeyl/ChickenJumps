@@ -15,6 +15,14 @@ export class SoundManager {
     this.soundtrack = new Audio('/assets/sounds/soundtrack.webm');
     this.soundtrack.loop = true;
     this.soundtrack.volume = this.soundtrackVolume;
+
+    // Добавляем обработчик на случай если loop не сработает
+    this.soundtrack.addEventListener('ended', () => {
+      if (!this.isMuted && this.soundtrack) {
+        this.soundtrack.currentTime = 0;
+        this.soundtrack.play().catch(err => console.warn('Soundtrack restart failed:', err));
+      }
+    });
   }
 
   private loadSound(name: string, path: string) {

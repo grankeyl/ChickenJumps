@@ -4,7 +4,7 @@ import type { Difficulty } from "../config/game.config";
 import { GAME_CFG } from "../config/game.config";
 import { chance, clamp, formatX, rnd } from "../utils/math";
 import { ChickenPuppet } from "../animations/ChickenPuppet";
-import { makePop, makeCrumble } from "../animations/Effects";
+import { makePop, makeCrumble, makeWinEffect } from "../animations/Effects";
 import { BalanceUI } from "../ui/Balance";
 import { BetPanel } from "../ui/BetPanel";
 import { SpinButton } from "../ui/SpinButton";
@@ -63,6 +63,7 @@ export class GameScene implements Scene {
   // Win animation tracking
   private winStartTime = 0;
   private winData?: { startX: number, startY: number, targetX: number, targetY: number, startScale: number, targetScale: number, direction: number };
+  private winEffects: Array<{ node: Container, update: (t: number) => void, startTime: number }> = [];
   private deathStartTime = 0;
   private deathStartX = 0;
   private deathWorldY = 0; // Сохраняем высоту камеры в момент смерти
@@ -92,6 +93,9 @@ export class GameScene implements Scene {
   // Sound manager
   private soundManager = new SoundManager();
   private soundtrackStarted = false;
+  private isCashingOut = false; // Флаг для предотвращения повторных cashout
+  private lastJumpTime = 0; // Время последнего прыжка
+  private jumpCooldown = 250; // Задержка между прыжками в миллисекундах (0.25 секунды)
 
   constructor(private game: Game) {
     // Порядок слоёв: небо → облака → ландшафт → платформы + курица → UI
@@ -103,6 +107,14 @@ export class GameScene implements Scene {
     this.view.addChild(this.ui);             // Фиксированный UI
 
     this.world.addChild(this.chicken); // Курица теперь в world вместе с платформами
+
+    // Добавляем обработчик клавиши пробела
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'Space' || e.key === ' ') {
+        e.preventDefault(); // Предотвращаем прокрутку страницы
+        this.onPlay();
+      }
+    });
 
     this.panel = new BetPanel({
       onDifficulty: (d) => {
@@ -165,7 +177,7 @@ export class GameScene implements Scene {
         },
         update: (dt) => {
           const elapsed = performance.now() - this.deathStartTime;
-          const duration = 5000; // Увеличили длительность до 5 секунд (очень медленно)
+          const duration = 1200; // 1.2 секунды - чуть медленнее
           const t = Math.min(elapsed / duration, 1);
 
           if (this.deathFx) {
@@ -173,55 +185,90 @@ export class GameScene implements Scene {
           }
 
           // UI re-enables позже
-          if (elapsed > 5000 && !this.playBtn.isEnabled()) {
+          if (elapsed > 1200 && !this.playBtn.isEnabled()) {
             this.playBtn.setEnabled(true);
             this.playBtn.setText("PLAY");
             this.panel.enabled = true;
           }
 
-          // Более плавное движение камеры с квинтичным easing (еще медленнее)
-          const easeT = 1 - Math.pow(1 - t, 5);
+          // Плавное движение камеры
+          const easeT = t * t * (3 - 2 * t); // Smoothstep easing
           const camY = this.deathWorldY * (1 - easeT);
 
           this.world.y = camY;
           this.landscapeLayer.y = camY;
           this.cloudLayer.y = camY;
 
-          // Плавное изменение масштаба: курица немного увеличивается в начале падения
-          const scalePhase = t < 0.4 ? t / 0.4 : 1; // Дольше увеличивается
-          const startScale = this.chicken.baseScaleValue * 1.2; // Начинаем с еще большего масштаба
-          const endScale = this.chicken.baseScaleValue;
-          const currentScale = startScale + (endScale - startScale) * scalePhase;
-          this.chicken.scale.set(currentScale * Math.abs(Math.sign(this.chicken.scale.x)), currentScale);
+          // Масштаб остается постоянным
+          this.chicken.scale.set(this.chicken.baseScaleValue * Math.abs(Math.sign(this.chicken.scale.x)), this.chicken.baseScaleValue);
 
-          // Очень медленная физика падения с сильным затуханием
+          // Плавная физика падения
           const dtSec = dt / 60;
-          const featherGravity = 60; // Уменьшили гравитацию до 60 (очень медленно)
+          const gravityEase = t * t * (3 - 2 * t); // Smoothstep для плавного нарастания
+          const gravity = 120 * gravityEase; // Более медленная гравитация с плавным нарастанием
 
-          this.chickenVelY += featherGravity * dtSec;
-          this.chickenVelY *= 0.97; // Еще больше сопротивление воздуха
+          this.chickenVelY += gravity * dtSec;
+          this.chickenVelY *= 0.98; // Больше сопротивление для плавности
 
           this.chicken.y += this.chickenVelY * dtSec;
 
-          // Более плавное спиральное падение
-          const spiralFreq = 2.5; // Меньше оборотов спирали (медленнее)
-          const swayAmp = 70 * (1 - t * 0.6); // Больше амплитуда, медленнее уменьшается
-          const spiralX = Math.sin(t * Math.PI * spiralFreq) * swayAmp;
-          const driftX = t * 15 * Math.sign(this.chicken.scale.x); // Меньше дрейф
-          this.chicken.x = this.deathStartX + spiralX + driftX;
+          // Курица падает прямо вниз без смещения по X
+          this.chicken.x = this.deathStartX;
 
-          // Более медленное кувыркание
-          const rotationSpeed = 2.0; // Уменьшили скорость вращения
-          const rotationEase = t < 0.8 ? t / 0.8 : 1; // Вращение замедляется еще позже
+          // Плавное вращение - замедляется к концу
+          const rotationEase = t * t * (3 - 2 * t); // Smoothstep для плавности
+          const rotationSpeed = 2; // Меньше оборотов для более плавного вращения
           this.chicken.rotation = rotationEase * Math.PI * 2 * rotationSpeed * Math.sign(this.chicken.scale.x);
 
-          // Более выраженное покачивание для эффекта "перышка"
-          const bobbing = Math.sin(t * Math.PI * 6) * 8 * (1 - t); // Медленнее, но амплитуда больше
-          this.chicken.y += bobbing * dtSec;
+          // Затухание в конце
+          if (t > 0.85) {
+            const fadeT = (t - 0.85) / 0.15;
+            this.chicken.alpha = 1 - fadeT * 0.4;
+          }
 
           if (t >= 1) {
+            this.chicken.alpha = 1; // Восстанавливаем альфу
             this.resetGame();
           }
+        }
+      })
+      .add({
+        name: "celebrate",
+        enter: () => {
+          this.winStartTime = performance.now();
+        },
+        update: (dt) => {
+          const elapsed = performance.now() - this.winStartTime;
+          const duration = 2000; // 2 секунды празднования
+          const t = Math.min(elapsed / duration, 1);
+
+          // Плавное увеличение размера курицы
+          const scaleEase = t * t * (3 - 2 * t); // Smoothstep
+          const startScale = this.chicken.baseScaleValue;
+          const targetScale = this.chicken.baseScaleValue * 1.5; // Увеличивается в 1.5 раза
+          const currentScale = startScale + (targetScale - startScale) * scaleEase;
+          this.chicken.scale.set(currentScale * Math.sign(this.chicken.scale.x), currentScale);
+
+          // Летает влево-вправо
+          const platform = this.platforms[this.currentPlatformIndex];
+          const centerX = platform.x + platform.w / 2;
+          const amplitude = 60; // Амплитуда полета
+          const frequency = 2; // Частота
+          const offsetX = Math.sin(t * Math.PI * frequency) * amplitude;
+          this.chicken.x = centerX + offsetX;
+
+          // Немного поднимается и опускается
+          const baseY = platform.y + 24;
+          const verticalAmplitude = 20;
+          const offsetY = Math.sin(t * Math.PI * frequency * 1.5) * verticalAmplitude;
+          this.chicken.y = baseY + offsetY - 10; // Немного поднята над платформой
+
+          // Легкий наклон в сторону движения
+          const tilt = Math.cos(t * Math.PI * frequency) * 0.1;
+          this.chicken.rotation = tilt;
+
+          // Анимация полета
+          this.chicken.setPoseFly(dt);
         }
       })
       .add({
@@ -362,6 +409,21 @@ export class GameScene implements Scene {
         }
       }
     }
+
+    // Обновляем эффекты победы
+    const now = performance.now();
+    for (let i = this.winEffects.length - 1; i >= 0; i--) {
+      const effect = this.winEffects[i];
+      const elapsed = now - effect.startTime;
+      const t = Math.min(elapsed / 1500, 1); // 1.5 секунды на эффект
+
+      effect.update(t);
+
+      if (t >= 1) {
+        effect.node.destroy({ children: true });
+        this.winEffects.splice(i, 1);
+      }
+    }
   }
 
   resize(screenW: number, screenH: number) {
@@ -397,6 +459,7 @@ export class GameScene implements Scene {
         ASSETS.cloud3,
         ASSETS.grass,
         ASSETS.platform,
+        ASSETS.platformFinish,
         ASSETS.indicator,
         ASSETS.indicatorGreen
       ]);
@@ -678,9 +741,17 @@ export class GameScene implements Scene {
   // ---------- GAMEPLAY ----------
 
   private onPlay() {
-    // If we're currently in the dead state (chicken still falling), reset everything immediately
+    // Блокируем прыжки во время анимации смерти
     if (this.sm.getCurrent() === "dead") {
-      this.resetGame();
+      return; // Не даем прыгать пока идет анимация смерти
+    }
+
+    // Проверяем задержку между прыжками (только если не на земле)
+    if (this.currentPlatformIndex !== -1) {
+      const now = performance.now();
+      if (now - this.lastJumpTime < this.jumpCooldown) {
+        return; // Слишком рано для следующего прыжка
+      }
     }
 
     // Если мы на земле, проверяем баланс и списываем ставку
@@ -707,6 +778,9 @@ export class GameScene implements Scene {
       }
     }
 
+    // Запоминаем время прыжка
+    this.lastJumpTime = performance.now();
+
     // Звук шага при каждом прыжке
     this.soundManager.play('step');
 
@@ -716,9 +790,10 @@ export class GameScene implements Scene {
     this.currentPlatformIndex++;
 
     if (this.currentPlatformIndex >= this.platforms.length) {
-      // Закончились платформы - курица прошла весь уровень!
-      // Запускаем анимацию победного вылета
-      this.triggerFinalWin();
+      // Закончились платформы - курица уже на последней!
+      // Просто не делаем прыжок, пусть игрок нажмет CASHOUT
+      this.currentPlatformIndex--;
+      this.playBtn.setEnabled(true);
       return;
     }
 
@@ -806,11 +881,26 @@ export class GameScene implements Scene {
     };
     requestAnimationFrame(anim);
 
-    // Проверяем проигрыш
+    // Проверяем, это была последняя платформа?
+    if (this.currentPlatformIndex === this.platforms.length - 1 && !this.isCashingOut) {
+      // На последней платформе гарантированный выигрыш!
+
+      // Запускаем анимацию празднования: курица увеличивается и летает
+      this.target = null;
+      this.sm.set("celebrate");
+
+      // Автоматический cashout через 2 секунды
+      setTimeout(() => {
+        this.onCashout();
+      }, 2000);
+      return;
+    }
+
+    // Проверяем проигрыш (только если это НЕ последняя платформа)
     const shotChance = GAME_CFG.difficulties[this.difficulty].shotChance;
     if (chance(shotChance)) {
       this.soundManager.play('lose');
-      this.chickenVelY = -120; // Более мягкий начальный импульс для медленного падения
+      this.chickenVelY = 0; // Начинаем с нулевой скорости для плавного падения
       this.sm.set("dead");
       return;
     }
@@ -821,53 +911,11 @@ export class GameScene implements Scene {
     this.sm.set("idle");
   }
 
-  private triggerFinalWin() {
-    // Когда курица прошла все платформы - автоматический cashout на максимальный коэффициент
-    const lastPlatform = this.platforms[this.platforms.length - 1];
-    const win = this.bet * lastPlatform.mult;
-
-    // Начисляем выигрыш
-    this.balance += win;
-    this.balanceUI.setBalance(this.balance);
-    this.checkBetLimit();
-
-    // Делаем кнопки неактивными и скрываем CASHOUT
-    this.cashBtn.hide();
-    this.cashBtn.setEnabled(false);
-    this.playBtn.setEnabled(false);
-
-    // Показываем выигрыш
-    this.panel.enabled = true;
-    this.panel.showWin(win);
-
-    // Подготовка и запуск анимации курицы
-    const startX = this.chicken.x;
-    const startYPos = this.chicken.y;
-    const startScale = Math.abs(this.chicken.scale.x);
-    const direction = Math.sign(this.chicken.scale.x);
-
-    this.winStartTime = performance.now();
-    this.winData = {
-      startX,
-      startY: startYPos,
-      targetX: direction > 0 ? this.w + 350 : -350,
-      targetY: startYPos - 250,
-      startScale,
-      targetScale: startScale * 1.1,
-      direction
-    };
-
-    // Перемещаем за платформы
-    this.world.addChildAt(this.chicken, 0);
-
-    // Играем звук cashout
-    this.soundManager.play('cashout');
-
-    this.sm.set("win");
-  }
-
   private async onCashout() {
     if (this.currentPlatformIndex === -1) return;
+    if (this.isCashingOut) return; // Уже выполняется cashout
+
+    this.isCashingOut = true;
 
     const p = this.platforms[this.currentPlatformIndex];
 
@@ -946,7 +994,15 @@ export class GameScene implements Scene {
       this.deathFx = undefined;
     }
 
+    // Очищаем все эффекты победы
+    for (const effect of this.winEffects) {
+      effect.node.destroy({ children: true });
+    }
+    this.winEffects = [];
+
     this.currentPlatformIndex = -1;
+    this.isCashingOut = false; // Сбрасываем флаг
+    this.lastJumpTime = 0; // Сбрасываем таймер прыжков
     this.buildLevel();
     this.layoutPlatforms();
     this.syncUIPositions(true);
@@ -1037,6 +1093,7 @@ export class GameScene implements Scene {
 
     const platTex = Assets.get(ASSETS.platform);
     const redPlatTex = Assets.get(ASSETS.platformRed);
+    const finishPlatTex = Assets.get(ASSETS.platformFinish);
     const indTex = Assets.get(ASSETS.indicator);
     const indGreenTex = Assets.get(ASSETS.indicatorGreen);
 
@@ -1049,16 +1106,26 @@ export class GameScene implements Scene {
     let nextLevitatingIn = 4 + Math.floor(Math.random() * 2); // Первая левитирующая где-то на 4-5 шаге (после стартовых 4-х безопасных)
 
     for (let i = 0; i < coefficients.length; i++) {
+      const isLastPlatform = i === coefficients.length - 1;
       let isLevitating = false;
-      if (i === nextLevitatingIn) {
+
+      // Последняя платформа никогда не левитирует
+      if (!isLastPlatform && i === nextLevitatingIn) {
         isLevitating = true;
         // Следующая через 3-6 платформ
         nextLevitatingIn += 3 + Math.floor(Math.random() * 4);
       }
 
       const container = new Container();
-      // Выбираем текстуру в зависимости от того, левитирует платформа или нет
-      const texture = (isLevitating && redPlatTex) ? redPlatTex : platTex;
+      // Выбираем текстуру: финишная, левитирующая красная, или обычная
+      let texture;
+      if (isLastPlatform && finishPlatTex) {
+        texture = finishPlatTex; // Финишная платформа
+      } else if (isLevitating && redPlatTex) {
+        texture = redPlatTex; // Красная левитирующая
+      } else {
+        texture = platTex; // Обычная платформа
+      }
       const sprite = new Sprite(texture);
 
       const indicator = new Sprite(indTex);
