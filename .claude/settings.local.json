@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(for f in *.png)"
+      "Bash(for f in *.png)",
+      "Bash(npm run dev:*)"
     ]
   }
 }

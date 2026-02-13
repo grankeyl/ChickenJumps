@@ -24,6 +24,7 @@ type Platform = {
   sprite: Sprite;
   indicator: Sprite;
   label: Text;
+  nest?: Sprite;
   baseX: number;
   baseY: number;
   isLevitating: boolean;
@@ -96,6 +97,7 @@ export class GameScene implements Scene {
   private isCashingOut = false; // Флаг для предотвращения повторных cashout
   private lastJumpTime = 0; // Время последнего прыжка
   private jumpCooldown = 250; // Задержка между прыжками в миллисекундах (0.25 секунды)
+  private isShaking = false; // Флаг для анимации покачивания
 
   constructor(private game: Game) {
     // Порядок слоёв: небо → облака → ландшафт → платформы + курица → UI
@@ -251,17 +253,18 @@ export class GameScene implements Scene {
 
           // Летает влево-вправо
           const platform = this.platforms[this.currentPlatformIndex];
-          const centerX = platform.x + platform.w / 2;
-          const amplitude = 60; // Амплитуда полета
+          // На последней платформе центр в гнезде
+          const centerX = platform.x + 145; // Позиция гнезда
+          const amplitude = 40; // Меньшая амплитуда для гнезда
           const frequency = 2; // Частота
           const offsetX = Math.sin(t * Math.PI * frequency) * amplitude;
           this.chicken.x = centerX + offsetX;
 
           // Немного поднимается и опускается
-          const baseY = platform.y + 24;
+          const baseY = platform.y - 13; // Позиция в гнезде
           const verticalAmplitude = 20;
           const offsetY = Math.sin(t * Math.PI * frequency * 1.5) * verticalAmplitude;
-          this.chicken.y = baseY + offsetY - 10; // Немного поднята над платформой
+          this.chicken.y = baseY + offsetY - 10; // Немного поднята над гнездом
 
           // Легкий наклон в сторону движения
           const tilt = Math.cos(t * Math.PI * frequency) * 0.1;
@@ -349,7 +352,7 @@ export class GameScene implements Scene {
     }
 
     // Анимация дыхания курицы в idle состоянии
-    if (this.sm.getCurrent() === "idle") {
+    if (this.sm.getCurrent() === "idle" && !this.isShaking) {
       this.chicken.setPoseIdle(dt);
     }
 
@@ -401,10 +404,18 @@ export class GameScene implements Scene {
         p.container.y = p.y;
 
         // Если курица стоит на этой платформе, двигаем её вместе с платформой
-        if (this.sm.getCurrent() === "idle" && this.currentPlatformIndex !== -1) {
+        if (this.sm.getCurrent() === "idle" && this.currentPlatformIndex !== -1 && !this.isShaking) {
           if (this.platforms[this.currentPlatformIndex] === p) {
-            this.chicken.x = p.x + p.w / 2;
-            this.chicken.y = p.y + 24; // Еще ниже (было +14)
+            const isLastPlatform = this.currentPlatformIndex === this.platforms.length - 1;
+            if (isLastPlatform) {
+              // На последней платформе курица в гнезде
+              this.chicken.x = p.x + 145;
+              this.chicken.y = p.y;
+            } else {
+              // На обычных платформах - в центре
+              this.chicken.x = p.x + p.w / 2;
+              this.chicken.y = p.y + 24; // Еще ниже (было +14)
+            }
           }
         }
       }
@@ -460,8 +471,11 @@ export class GameScene implements Scene {
         ASSETS.grass,
         ASSETS.platform,
         ASSETS.platformFinish,
+        ASSETS.platformEnd,
+        ASSETS.nest,
         ASSETS.indicator,
-        ASSETS.indicatorGreen
+        ASSETS.indicatorGreen,
+        ASSETS.indicatorEnd
       ]);
 
       const skyTex = Assets.get(ASSETS.sky);
@@ -707,15 +721,26 @@ export class GameScene implements Scene {
     // Платформы с увеличенным интервалом для красоты
     for (let i = 0; i < this.platforms.length; i++) {
       const p = this.platforms[i];
-      const ratio = xOffsets[i % xOffsets.length];
+      const isLastPlatform = i === this.platforms.length - 1;
 
-      const tx = this.w * ratio - 6; // Сдвинуто на 12px вправо (было - 18)
-      // Увеличенный интервал 110px между платформами. Поднято еще на 5px (итого 31px от оригинала, было - 50)
-      const py = baseY - 81 - i * 110;
+      let tx, py;
 
-      p.w = 160;
-      p.h = 44;
-      p.x = clamp(tx, 400, this.w - 180);
+      if (isLastPlatform) {
+        // Последняя платформа: размер 372×77, торчит справа без отступов
+        p.w = 372;
+        p.h = 77;
+        tx = this.w - p.w + 50; // Сдвинута вправо (торчит за край)
+        py = baseY - 81 - i * 110 - 30; // Поднята выше на 30px
+      } else {
+        // Обычные платформы
+        const ratio = xOffsets[i % xOffsets.length];
+        tx = this.w * ratio - 6;
+        py = baseY - 81 - i * 110;
+        p.w = 160;
+        p.h = 44;
+      }
+
+      p.x = isLastPlatform ? tx : clamp(tx, 400, this.w - 180);
       p.y = py;
       p.baseX = p.x;
       p.baseY = py;
@@ -724,12 +749,34 @@ export class GameScene implements Scene {
       p.sprite.width = p.w;
       p.sprite.height = p.h;
 
+      // Настраиваем гнездо для последней платформы
+      if (isLastPlatform && p.nest) {
+        p.nest.width = 180;
+        p.nest.height = 89;
+        // Позиционируем гнездо на ветке (платформе)
+        // x: ближе к левому краю платформы, y: сидит на платформе (низ гнезда на уровне платформы)
+        p.nest.position.set(90, p.h); // x: 90px от левого края, y: на уровне платформы
+      }
+
       p.indicator.width = 90;
       p.indicator.height = 36;
       p.indicator.position.set(p.w / 2, p.h + 2);
 
       p.label.text = formatX(p.mult);
       p.label.position.set(p.w / 2, p.h + 2);
+
+      if (isLastPlatform && p.nest) {
+        p.nest.width = 180;
+        p.nest.height = 89;
+        p.nest.position.set(145, p.h - 37);
+        
+        p.indicator.width = 90;
+        p.indicator.height = 36;
+        p.indicator.position.set(p.w / 2.57, p.h - 38);
+
+        p.label.text = formatX(p.mult);
+        p.label.position.set(p.w / 2.57, p.h - 36);
+      }
 
       p.container.visible = true;
     }
@@ -798,12 +845,26 @@ export class GameScene implements Scene {
     }
 
     const next = this.platforms[this.currentPlatformIndex];
+    const isLastPlatform = this.currentPlatformIndex === this.platforms.length - 1;
+
+    // Для последней платформы прыгаем в гнездо (слева на платформе)
+    let targetX;
+    if (isLastPlatform) {
+      targetX = next.x + 145; // Координата гнезда (x: 145 от начала платформы)
+    } else {
+      targetX = next.x + next.w / 2; // Центр обычной платформы
+    }
 
     // Курица и платформы в одном контейнере, используем координаты напрямую
-    this.target = { x: next.x + next.w / 2, y: next.y, platform: next };
+    this.target = { x: targetX, y: next.y, platform: next };
 
     // Поворачиваем курицу в направлении прыжка
-    this.chicken.setDirection(this.target.x);
+    // Для последней платформы принудительно поворачиваем влево (отрицательное направление)
+    if (isLastPlatform) {
+      this.chicken.scale.x = -Math.abs(this.chicken.scale.x);
+    } else {
+      this.chicken.setDirection(this.target.x);
+    }
 
     this.sm.set("jump");
   }
@@ -835,8 +896,18 @@ export class GameScene implements Scene {
       : 1 - Math.pow(-2 * this.jumpT + 2, 4) / 2; // Quartic ease out
 
     // Плавное движение по X - линейная интерполяция с учетом движения платформы
-    // Целимся в центр платформы, которая может двигаться
-    const currentTargetX = this.target.platform ? this.target.platform.x + this.target.platform.w / 2 : this.target.x;
+    // Для последней платформы целимся в гнездо, для остальных - в центр
+    const isLastPlatform = this.currentPlatformIndex === this.platforms.length - 1;
+    let currentTargetX;
+
+    if (isLastPlatform && this.target.platform) {
+      // Прыгаем в гнездо
+      currentTargetX = this.target.platform.x + 145;
+    } else {
+      // Целимся в центр платформы, которая может двигаться
+      currentTargetX = this.target.platform ? this.target.platform.x + this.target.platform.w / 2 : this.target.x;
+    }
+
     const currentTargetY = this.target.platform ? this.target.platform.y : this.target.y;
 
     this.chicken.x = this.jumpStartX + (currentTargetX - this.jumpStartX) * easeT;
@@ -844,14 +915,16 @@ export class GameScene implements Scene {
     // Плавное движение по Y - параболическая дуга
     const heightProgress = Math.sin(this.jumpT * Math.PI); // 0->1->0 (дуга)
     const arcHeight = 50; // Вернули нормальную дугу
-    const straightY = this.jumpStartY + (currentTargetY + 24 - this.jumpStartY) * easeT;
+    // Для последней платформы курица приземляется в гнездо (ниже)
+    const landingOffset = isLastPlatform ? 0 : 24; // В гнезде на уровне платформы
+    const straightY = this.jumpStartY + (currentTargetY + landingOffset - this.jumpStartY) * easeT;
     this.chicken.y = straightY - heightProgress * arcHeight;
 
     this.chicken.setPoseJump(this.jumpT);
 
     // Проверяем завершение прыжка
     if (this.jumpT >= 1.0) {
-      this.chicken.y = currentTargetY + 24;
+      this.chicken.y = currentTargetY + landingOffset;
       this.chicken.x = currentTargetX;
       this.onLand();
     }
@@ -884,15 +957,28 @@ export class GameScene implements Scene {
     // Проверяем, это была последняя платформа?
     if (this.currentPlatformIndex === this.platforms.length - 1 && !this.isCashingOut) {
       // На последней платформе гарантированный выигрыш!
+      // Курица просто садится в гнездо
 
-      // Запускаем анимацию празднования: курица увеличивается и летает
+      // Перемещаем курицу за гнездо (ниже по z-index)
+      const lastPlatform = this.platforms[this.currentPlatformIndex];
+      const platformIndex = this.world.getChildIndex(lastPlatform.container);
+      // Добавляем курицу прямо перед платформой (под всеми её элементами, включая гнездо)
+      this.world.addChildAt(this.chicken, platformIndex);
+
       this.target = null;
-      this.sm.set("celebrate");
+      this.playBtn.setEnabled(true);
+      this.sm.set("idle");
 
-      // Автоматический cashout через 2 секунды
+      // Анимация покачивания гнезда
+      this.shakeNest(lastPlatform);
+
+      // Создаем красивый эффект победы с частицами
+      this.createVictoryEffect(lastPlatform);
+
+      // Автоматический cashout через 1.5 секунды
       setTimeout(() => {
         this.onCashout();
-      }, 2000);
+      }, 1500);
       return;
     }
 
@@ -958,28 +1044,159 @@ export class GameScene implements Scene {
     };
     requestAnimationFrame(animateIndicator);
 
-    // 6. Подготовка и запуск анимации курицы
-    const startX = this.chicken.x;
-    const startYPos = this.chicken.y;
-    const startScale = Math.abs(this.chicken.scale.x);
-    const direction = Math.sign(this.chicken.scale.x);
+    // 6. Проверяем, это последняя платформа?
+    const isLastPlatform = this.currentPlatformIndex === this.platforms.length - 1;
 
-    this.winStartTime = performance.now();
-    this.winData = {
-      startX,
-      startY: startYPos,
-      targetX: direction > 0 ? this.w + 350 : -350,
-      targetY: startYPos - 250,
-      startScale,
-      targetScale: startScale * 1.1, // Еще меньше рост
-      direction
+    if (isLastPlatform) {
+      // На последней платформе курица остается в гнезде и не улетает
+      // Просто показываем выигрыш и ждем
+      setTimeout(() => {
+        this.finishWin();
+      }, 2000); // Показываем выигрыш 2 секунды
+    } else {
+      // На обычных платформах - анимация улета
+      const startX = this.chicken.x;
+      const startYPos = this.chicken.y;
+      const startScale = Math.abs(this.chicken.scale.x);
+      const direction = Math.sign(this.chicken.scale.x);
+
+      this.winStartTime = performance.now();
+      this.winData = {
+        startX,
+        startY: startYPos,
+        targetX: direction > 0 ? this.w + 350 : -350,
+        targetY: startYPos - 250,
+        startScale,
+        targetScale: startScale * 1.1, // Еще меньше рост
+        direction
+      };
+
+      // Перемещаем за платформы
+      this.world.addChildAt(this.chicken, 0);
+
+      this.sm.set("win");
+    }
+  }
+
+  private shakeNest(platform: Platform) {
+    if (!platform.nest) return;
+
+    this.isShaking = true; // Блокируем обновление позиции курицы
+
+    const nest = platform.nest;
+    const originalNestRotation = nest.rotation;
+    const originalChickenRotation = this.chicken.rotation;
+    const originalChickenY = this.chicken.y;
+    const originalChickenX = this.chicken.x;
+    const shakeIntensity = 0.05; // Уменьшили угол покачивания (~2.9 градусов)
+    const bounceHeight = 3; // Высота подпрыгивания курицы
+    const duration = 500; // Более короткая длительность
+    const startTime = performance.now();
+
+    const animateShake = () => {
+      const elapsed = performance.now() - startTime;
+      const t = elapsed / duration;
+
+      if (t >= 1) {
+        nest.rotation = originalNestRotation; // Возвращаем в исходное положение
+        this.chicken.rotation = originalChickenRotation; // Возвращаем курицу
+        this.chicken.y = originalChickenY; // Возвращаем позицию по Y
+        this.chicken.x = originalChickenX; // Возвращаем позицию по X
+        this.isShaking = false; // Разблокируем обновление позиции
+        return;
+      }
+
+      // Затухающее покачивание (как маятник)
+      const decay = 1 - t; // Затухание от 1 до 0
+      const frequency = 6; // Уменьшили частоту для более плавного покачивания
+      const shake = Math.sin(t * Math.PI * frequency) * shakeIntensity * decay;
+
+      // Вертикальное покачивание (подпрыгивание)
+      const bounce = Math.abs(Math.sin(t * Math.PI * frequency)) * bounceHeight * decay;
+
+      nest.rotation = originalNestRotation + shake;
+      this.chicken.rotation = originalChickenRotation + shake; // Курица качается вместе с гнездом
+      this.chicken.y = originalChickenY - bounce; // Курица немного подпрыгивает
+      this.chicken.x = originalChickenX; // Сохраняем X позицию
+
+      requestAnimationFrame(animateShake);
     };
 
-    // Перемещаем за платформы
-    this.world.addChildAt(this.chicken, 0);
+    requestAnimationFrame(animateShake);
+  }
 
-    this.sm.set("win");
+  private createVictoryEffect(platform: Platform) {
+    // Создаем золотые частицы вокруг гнезда
+    const particleCount = 20;
+    const centerX = platform.x + 145;
+    const centerY = platform.y;
 
+    for (let i = 0; i < particleCount; i++) {
+      const particle = new Graphics();
+      particle.circle(0, 0, 3 + Math.random() * 3);
+      particle.fill({ color: 0xFFD700 }); // Золотой цвет
+
+      particle.x = centerX;
+      particle.y = centerY;
+
+      this.world.addChild(particle);
+
+      // Анимация частицы
+      const angle = (Math.PI * 2 * i) / particleCount;
+      const speed = 2 + Math.random() * 2;
+      const lifetime = 1000 + Math.random() * 500;
+      const startTime = performance.now();
+
+      const animateParticle = () => {
+        const elapsed = performance.now() - startTime;
+        const t = elapsed / lifetime;
+
+        if (t >= 1) {
+          particle.destroy();
+          return;
+        }
+
+        // Движение по спирали наружу
+        const distance = t * 100 * speed;
+        particle.x = centerX + Math.cos(angle + t * 3) * distance;
+        particle.y = centerY + Math.sin(angle + t * 3) * distance - t * 50; // Поднимается вверх
+
+        // Затухание
+        particle.alpha = 1 - t;
+
+        requestAnimationFrame(animateParticle);
+      };
+
+      requestAnimationFrame(animateParticle);
+    }
+
+    // Добавляем блеск в центре
+    const glow = new Graphics();
+    glow.circle(0, 0, 40);
+    glow.fill({ color: 0xFFFF00, alpha: 0.3 });
+    glow.x = centerX;
+    glow.y = centerY;
+    this.world.addChild(glow);
+
+    const glowStartTime = performance.now();
+    const animateGlow = () => {
+      const elapsed = performance.now() - glowStartTime;
+      const t = elapsed / 800;
+
+      if (t >= 1) {
+        glow.destroy();
+        return;
+      }
+
+      // Пульсация
+      const scale = 1 + Math.sin(t * Math.PI * 4) * 0.3;
+      glow.scale.set(scale);
+      glow.alpha = (1 - t) * 0.5;
+
+      requestAnimationFrame(animateGlow);
+    };
+
+    requestAnimationFrame(animateGlow);
   }
 
   private finishWin() {
@@ -1094,8 +1311,11 @@ export class GameScene implements Scene {
     const platTex = Assets.get(ASSETS.platform);
     const redPlatTex = Assets.get(ASSETS.platformRed);
     const finishPlatTex = Assets.get(ASSETS.platformFinish);
+    const endPlatTex = Assets.get(ASSETS.platformEnd);
+    const nestTex = Assets.get(ASSETS.nest);
     const indTex = Assets.get(ASSETS.indicator);
     const indGreenTex = Assets.get(ASSETS.indicatorGreen);
+    const indEndTex = Assets.get(ASSETS.indicatorEnd);
 
     // Get coefficients for the current difficulty
     const coefficients = GAME_CFG.difficulties[this.difficulty].coefficients;
@@ -1117,18 +1337,23 @@ export class GameScene implements Scene {
       }
 
       const container = new Container();
-      // Выбираем текстуру: финишная, левитирующая красная, или обычная
+      // Выбираем текстуру: последняя (end), левитирующая красная, или обычная
       let texture;
-      if (isLastPlatform && finishPlatTex) {
-        texture = finishPlatTex; // Финишная платформа
+      let indicatorTexture;
+
+      if (isLastPlatform && endPlatTex) {
+        texture = endPlatTex; // Последняя платформа с текстурой platform-end.png
+        indicatorTexture = indEndTex || indTex; // Индикатор indicator-end.png
       } else if (isLevitating && redPlatTex) {
         texture = redPlatTex; // Красная левитирующая
+        indicatorTexture = indTex;
       } else {
         texture = platTex; // Обычная платформа
+        indicatorTexture = indTex;
       }
       const sprite = new Sprite(texture);
 
-      const indicator = new Sprite(indTex);
+      const indicator = new Sprite(indicatorTexture);
       indicator.anchor.set(0.5);
 
       const mult = coefficients[i];
@@ -1145,19 +1370,34 @@ export class GameScene implements Scene {
       });
       label.anchor.set(0.5);
 
-      container.addChild(sprite, indicator, label);
+      // Добавляем гнездо для последней платформы
+      let nest: Sprite | undefined;
+      if (isLastPlatform && nestTex) {
+        nest = new Sprite(nestTex);
+        nest.anchor.set(0.5, 1); // Центр по X, низ по Y
+      }
+
+      // Порядок важен: платформа -> гнездо -> индикатор -> метка (индикатор поверх гнезда)
+      container.addChild(sprite);
+      if (nest) container.addChild(nest);
+      container.addChild(indicator, label);
       this.world.addChild(container);
+
+      // Начальные размеры (будут установлены в layoutPlatforms)
+      const initialW = isLastPlatform ? 372 : 160;
+      const initialH = isLastPlatform ? 77 : 44;
 
       this.platforms.push({
         x: 0,
         y: 0,
-        w: 160,
-        h: 44,
+        w: initialW,
+        h: initialH,
         mult: coefficients[i],
         container,
         sprite,
         indicator,
         label,
+        nest,
         baseX: 0,
         baseY: 0,
         isLevitating,

@@ -12,5 +12,5 @@ export function formatMoney(n: number) {
 }
 
 export function formatX(x: number) {
-  return `${x.toFixed(2)}x`;
+  return `${x.toFixed(2)}`;
 }
